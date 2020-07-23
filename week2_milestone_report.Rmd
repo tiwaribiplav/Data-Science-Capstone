@@ -1,0 +1,117 @@
+---
+title: "Week 2 Milestone Report"
+author: "Biplav"
+date: "July 17, 2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+In this report we look at three corpora of US English text, a set of internet blogs posts, a set of internet news articles, and a set of twitter messages. We collect the information on file size, number of lines, number of words and number of characters.
+
+In the following section we will describe the data collection process, the section after that gives the results of the data exploration, we finally present conclusions.
+
+# Data
+The data is presented as a [ZIP compressed archive](http://en.wikipedia.org/wiki/Zip_(file_format)), which is freely downloadable from [here](https://d396qusza40orc.cloudfront.net/dsscapstone/dataset/Coursera-SwiftKey.zip).
+
+```{r}
+blogs <- readLines("final/en_US/en_US.blogs.txt", warn = FALSE, encoding = "UTF-8")
+news <- readLines("final/en_US/en_US.news.txt", warn = FALSE, encoding = "UTF-8")
+twitter <- readLines("final/en_US/en_US.twitter.txt", warn = FALSE, encoding = "UTF-8")
+```
+
+# Basic Statistics
+Now that the data are read into memory, we can obtain basic information about the datafiles (e.g. file sizes) and their contents (e.g. word counts).
+
+```{r}
+summary <- data.frame('File' = c("Blogs","News","Twitter"), "File Size" = sapply(list(blogs, news, twitter), function(x){format(object.size(x),"MB")}), 'Lines' = sapply(list(blogs, news, twitter), function(x){length(x)}), 'TotalCharacters' = sapply(list(blogs, news, twitter), function(x){sum(nchar(x))}), 'MaxCharacters' = sapply(list(blogs, news, twitter), function(x){max(unlist(lapply(x, function(y) nchar(y))))}))
+summary
+```
+
+# Data Cleaning and Selection of Corpus
+Because the data are so big (see summary table above) we are only going to proceed with a subset (e,g, 5% of each file). Then we are going to clean the data and convert to a corpus.
+
+```{r}
+set.seed(1313)
+sample_size <- 0.05
+
+blogs_index <- sample(seq_len(length(blogs)),length(blogs)*sample_size)
+news_index <- sample(seq_len(length(news)),length(news)*sample_size)
+twitter_index <- sample(seq_len(length(twitter)),length(twitter)*sample_size)
+
+blogs_sub <- blogs[blogs_index[]]
+news_sub <- news[news_index[]]
+twitter_sub <- twitter[twitter_index[]]
+
+library(tm)
+library(SnowballC)
+
+# Making the corpus out of all 3 sub sampled data sets and then tidying up a bit
+corpus <- Corpus(VectorSource(c(blogs_sub, news_sub, twitter_sub)), readerControl=list(reader=readPlain,language="en"))
+
+# Converting to Corpus seems to mess up the encoding, need to remove non ASCII characters
+corpus <- Corpus(VectorSource(sapply(corpus, function(row) iconv(row, "latin1", "ASCII", sub=""))))
+
+corpus <- tm_map(corpus, removePunctuation)
+corpus <- tm_map(corpus, stripWhitespace)
+corpus <- tm_map(corpus, content_transformer(tolower))
+corpus <- tm_map(corpus, removeNumbers)
+corpus <- tm_map(corpus, PlainTextDocument)
+```
+
+# N-Grams
+Now that we have a clean dataset we need to convert it to a format that is most useful for Natural Language Prpcessing (NLP). The format of choice are N-grams stored in Term Document Matrices (TDM). The N-gram representation of a text lists all N-tuples of words that appear. The simplest case is the unigram which is based on individual words. The bigram is based on pairs of to words and so on. The TDMs store the frequencies of the N-grams in the respective sources.
+
+```{r}
+library(RWeka)
+library(rJava)
+
+UnigramTokenizer <- function(x) NGramTokenizer(x, Weka_control(min = 1, max = 1))
+BigramTokenizer <- function(x) NGramTokenizer(x, Weka_control(min = 2, max = 2))
+
+Unigrams <- TermDocumentMatrix(corpus, control = list(tokenize = UnigramTokenizer))
+Bigrams <- TermDocumentMatrix(corpus, control = list(tokenize = BigramTokenizer))
+```
+
+# Exploratory Data Analysis
+The above matrices are extremely sparse (i.e. they are almost entirely cmposed of zeroes). We need to create a denser matrices to do exploratory analyses and remove rare N-grams.
+
+```{r}
+library(ggplot2)
+
+# Function to sum up rows and sort by N-gram frequency
+freq_frame <- function(tdm){
+    freq <- sort(rowSums(as.matrix(tdm)), decreasing=TRUE)
+    freq_frame <- data.frame(word=names(freq), freq=freq)
+    return(freq_frame)
+}
+
+# Make matrices more dense, add up and sort
+UnigramsDense <- removeSparseTerms(Unigrams, 0.999)
+UnigramsDenseSorted <- freq_frame(UnigramsDense)
+BigramsDense <- removeSparseTerms(Bigrams, 0.999)
+BigramsDenseSorted <- freq_frame(BigramsDense)
+
+# Graph for most abundant unigrams
+GG <- ggplot(data = UnigramsDenseSorted[1:40,], aes(x = reorder(word, -freq), y = freq)) + geom_bar(stat="identity")
+GG <- GG + labs(x = "N-gram", y = "Frequency", title = "Frequencies of the 40 Most Abundant Unigrams (individual words)")
+GG <- GG + theme(axis.text.x=element_text(angle=90))
+GG
+
+# Graph for most abundant bigrams
+GG <- ggplot(data = BigramsDenseSorted[1:40,], aes(x = reorder(word, -freq), y = freq)) + geom_bar(stat="identity")
+GG <- GG + labs(x = "N-gram", y = "Frequency", title = "Frequencies of the 40 Most Abundant Bigrams (pairs of words)")
+GG <- GG + theme(axis.text.x=element_text(angle=90))
+GG
+```
+
+# Conclusion
+We analyse three corpora of US english text. The file sizes are around 200 MegaBytes (MBs) per file. We find that the **blogs** and **news** corpora consist of about 1 million items each, and the **twitter** corpus consist of over 2 million items.
+
+Also, building N-grams takes some time, even when downsampling to 5%. The longer the N-grams, the lower their abundance.
+
+# Plan for creating a prediction algorithm and Shiny app
+For my app, I am interested in providing functionality for hash tags from the twitter data. The idea is to predict what may follow a hash tag, just like other words. Hashtags by themselves are unigrams even if they represent multiple words (e.g. #HungryLikeAWolf), but they may be preceeded by other words. The predictive model would first try to predict by a quadgram, then a trigram, then a bigram and the word itself. In addition to word buttons to insert the text, I plan to show the output as a wordcloud wherein the word size is the probability of that word following what the user typed in.
